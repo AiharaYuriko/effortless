@@ -15,13 +15,25 @@ import net.minecraft.world.phys.*;
 public final class TraceScope {
     private static final ThreadLocal<TraceScope> CURRENT = new ThreadLocal<>();
     private final Level level;
+    private final Vec3 previewEye;
+    private final Vec3 previewLook;
+    private final BlockHitResult crosshair;
     private Frame frame;
     private Pose3dc pose;
 
-    private TraceScope(Player player) { level = player.getWorld().reference(); }
+    private TraceScope(Player player, Vec3 previewEye, Vec3 previewLook, BlockHitResult crosshair) {
+        level = player.getWorld().reference();
+        this.previewEye = previewEye;
+        this.previewLook = previewLook;
+        this.crosshair = crosshair;
+    }
 
     public static BlockInteraction trace(Structure structure, Player player, Context context) {
-        var scope = new TraceScope(player);
+        return trace(structure, player, context, null, null, null);
+    }
+
+    static BlockInteraction trace(Structure structure, Player player, Context context, Vec3 eye, Vec3 look, BlockHitResult crosshair) {
+        var scope = new TraceScope(player, eye, look, crosshair);
         if (context.interactionsSize() != 0) {
             scope.frame = Frame.first(context);
             if (scope.frame == null || !scope.frame.contains(scope.level, context.getPosition(0))) return null;
@@ -46,22 +58,37 @@ public final class TraceScope {
 
     public static Vector3d eye(Player player) {
         var s = CURRENT.get();
-        var eye = player.getEyePosition();
+        var eye = s != null && s.previewEye != null ? vector(s.previewEye) : player.getEyePosition();
         return s == null || s.pose == null ? eye : vector(s.pose.transformPositionInverse(vec(eye)));
     }
 
     public static Vector3d look(Player player) {
         var s = CURRENT.get();
-        var look = player.getEyeDirection();
+        var look = s != null && s.previewLook != null ? vector(s.previewLook) : player.getEyeDirection();
         return s == null || s.pose == null ? look : vector(s.pose.transformNormalInverse(vec(look)).normalize());
     }
 
     public static BlockInteraction pick(Player player, double reach, float tick, boolean fluids) {
         var s = CURRENT.get();
         if (s == null) return player.raytrace(reach, tick, fluids);
-        Vec3 worldStart = vec(player.getEyePosition());
-        Vec3 worldEnd = worldStart.add(vec(player.getEyeDirection()).scale(reach));
+        Vec3 worldStart = s.previewEye != null ? s.previewEye : vec(player.getEyePosition());
+        Vec3 direction = s.previewLook != null ? s.previewLook : vec(player.getEyeDirection());
+        Vec3 worldEnd = worldStart.add(direction.scale(reach));
         if (s.frame != null) return interaction(s.clip(player, fluids, worldStart, worldEnd, s.frame, s.pose));
+
+        // The client already picked the closest outline at this render pose.
+        // Reuse it only for an unlocked solid-block ray within the tool's reach.
+        if (!fluids && s.crosshair != null) {
+            var pos = s.crosshair.getBlockPos();
+            var ship = SableCompanion.INSTANCE.getContaining(s.level, pos);
+            if (ship instanceof ClientSubLevelAccess client) {
+                var worldHit = client.renderPose().transformPosition(s.crosshair.getLocation());
+                if (worldStart.distanceToSqr(worldHit) <= reach * reach) {
+                    s.frame = Frame.at(s.level, pos);
+                    return interaction(s.crosshair);
+                }
+            }
+        }
 
         String dimension = s.level.dimension().location().toString();
         var selected = new Frame(dimension, null);
